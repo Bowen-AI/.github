@@ -1,0 +1,91 @@
+name: Update Org Profile README
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # daily at 03:00 UTC
+  workflow_dispatch:
+
+jobs:
+  update-profile:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout profile repo
+        uses: actions/checkout@v4
+
+      - name: Generate and Update Repo List
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            const org = "BowenAI";
+            const per_page = 100;
+            let page = 1;
+            let repos = [];
+            
+            try {
+              while (true) {
+                const res = await github.rest.repos.listForOrg({
+                  org,
+                  type: "public",
+                  sort: "updated",
+                  per_page,
+                  page
+                });
+                repos = repos.concat(res.data);
+                if (res.data.length < per_page) break;
+                page++;
+              }
+              
+              // Filter out the administrative .github repository itself and archived repos
+              const filteredRepos = repos.filter(repo => repo.name.toLowerCase() !== '.github' && !repo.archived);
+              
+              // Sort repos: first by stars (descending), then by name (ascending)
+              filteredRepos.sort((a, b) => b.stargazers_count - a.stargazers_count || a.name.localeCompare(b.name));
+              
+              // Format repository list as clean markdown list items
+              const lines = filteredRepos.map(repo => {
+                const desc = repo.description ? repo.description : '_No description provided._';
+                const stars = repo.stargazers_count > 0 ? ` ⭐️ \`${repo.stargazers_count}\`` : '';
+                const lang = repo.language ? ` 🏷️ \`${repo.language}\`` : '';
+                const fork = repo.fork ? ' 🍴 _fork_' : '';
+                return `- **[${repo.name}](${repo.html_url})** ${stars}${lang}${fork}  \n  ${desc}`;
+              });
+              
+              const listContent = lines.length > 0 
+                ? lines.join('\n') 
+                : '_No public repositories available yet. Stay tuned!_';
+              
+              const readmePath = path.join(process.env.GITHUB_WORKSPACE || '.', 'profile', 'README.md');
+              if (fs.existsSync(readmePath)) {
+                let content = fs.readFileSync(readmePath, 'utf8');
+                const regex = /(<!--START-REPO-LIST-->)([\s\S]*?)(<!--END-REPO-LIST-->)/;
+                if (regex.test(content)) {
+                  content = content.replace(regex, `$1\n${listContent}\n$3`);
+                  fs.writeFileSync(readmePath, content, 'utf8');
+                  console.log('Successfully updated profile/README.md with repository list.');
+                } else {
+                  core.setFailed('Could not find START-REPO-LIST and END-REPO-LIST comments in README.md');
+                }
+              } else {
+                core.setFailed(`README file not found at: ${readmePath}`);
+              }
+            } catch (error) {
+              core.setFailed(`Failed to generate repo list: ${error.message}`);
+            }
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [[ -n $(git status -s) ]]; then
+            git add profile/README.md
+            git commit -m "chore: auto-update public repositories list"
+            git push
+          else
+            echo "No changes to commit"
+          fi
